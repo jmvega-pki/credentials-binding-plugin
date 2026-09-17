@@ -53,6 +53,10 @@ import java.util.stream.Collectors;
 
 import org.jenkinsci.plugins.credentialsbinding.MultiBinding;
 import org.jenkinsci.plugins.credentialsbinding.masking.SecretPatterns;
+import org.jenkinsci.plugins.credentialsbinding.refresh.RefreshBindingConfiguration;
+import org.jenkinsci.plugins.credentialsbinding.refresh.RefreshingFailureHandler;
+import org.jenkinsci.plugins.credentialsbinding.refresh.RefreshingFilter;
+import org.jenkinsci.plugins.credentialsbinding.refresh.RefreshingOverrider;
 import org.jenkinsci.plugins.workflow.steps.AbstractStepExecutionImpl;
 import org.jenkinsci.plugins.workflow.steps.BodyExecutionCallback;
 import org.jenkinsci.plugins.workflow.steps.BodyInvoker;
@@ -122,10 +126,26 @@ public final class BindingStep extends Step {
             FilePath workspace = getContext().get(FilePath.class);
             Launcher launcher = getContext().get(Launcher.class);
 
+            // Partition the bindings into a "refreshing" set (credential IDs selected by the admin,
+            // re-resolved per step with union masking) and a "stock" set (everything else, wired exactly
+            // as upstream). When the selection is empty ALL bindings are stock and the behavior below is
+            // byte-for-byte identical to the upstream credentials-binding plugin.
+            RefreshBindingConfiguration refreshConfig = RefreshBindingConfiguration.get();
+            List<MultiBinding<?>> refreshingBindings = new ArrayList<>();
+            List<MultiBinding<?>> stockBindings = new ArrayList<>();
+            for (MultiBinding<?> binding : step.bindings) {
+                if (refreshConfig != null && refreshConfig.isRefreshing(binding.getCredentialsId())) {
+                    refreshingBindings.add(binding);
+                } else {
+                    stockBindings.add(binding);
+                }
+            }
+
+            // Stock path: eager resolution -> static Overrider + Filter (unchanged upstream logic).
             Map<String,String> secretOverrides = new LinkedHashMap<>();
             Map<String,String> publicOverrides = new LinkedHashMap<>();
             List<MultiBinding.Unbinder> unbinders = new ArrayList<>();
-            for (MultiBinding<?> binding : step.bindings) {
+            for (MultiBinding<?> binding : stockBindings) {
                 if (binding.getDescriptor().requiresWorkspace() &&
                         (workspace == null || launcher == null)) {
                     throw new MissingContextVariableException(FilePath.class, step.getDescriptor());
@@ -142,11 +162,41 @@ public final class BindingStep extends Step {
                 ).collect(Collectors.joining(" or ")));
             }
 
+            EnvironmentExpander expander = EnvironmentExpander.merge(
+                    getContext().get(EnvironmentExpander.class), new Overrider(secretOverrides, publicOverrides));
+            ConsoleLogFilter logFilter = BodyInvoker.mergeConsoleLogFilters(
+                    getContext().get(ConsoleLogFilter.class), new Filter(secretOverrides.values(), run.getCharset().name()));
+            FailureHandler failureHandler = FailureHandler.merge(
+                    getContext().get(FailureHandler.class), new Handler(secretOverrides.values()));
+
+            // Refreshing path. Build a single union-masking filter and a RefreshingOverrider that re-binds
+            // the selected credentials on every expand() (i.e. on every step), then merge BOTH the
+            // refreshing overrider and its filter into the body context alongside the stock ones. The
+            // refreshing overrider is recorded so its unbinders run at step teardown.
+            RefreshingOverrider refreshingOverrider = null;
+            if (!refreshingBindings.isEmpty()) {
+                for (MultiBinding<?> binding : refreshingBindings) {
+                    if (binding.getDescriptor().requiresWorkspace() &&
+                            (workspace == null || launcher == null)) {
+                        throw new MissingContextVariableException(FilePath.class, step.getDescriptor());
+                    }
+                }
+                RefreshingFilter refreshingFilter = new RefreshingFilter(run.getCharset().name());
+                refreshingOverrider = new RefreshingOverrider(
+                        refreshingBindings, run, workspace, launcher, listener, refreshingFilter);
+                expander = EnvironmentExpander.merge(expander, refreshingOverrider);
+                logFilter = BodyInvoker.mergeConsoleLogFilters(logFilter, refreshingFilter);
+                // Also mask refreshing secrets on the exception/failure surface (ErrorAction, stage view,
+                // /wfapi, catch(e).getMessage()), which the ConsoleLogFilter does not cover. Driven by the
+                // filter's LIVE secret set at failure time.
+                failureHandler = FailureHandler.merge(failureHandler, new RefreshingFailureHandler(refreshingFilter));
+            }
+
             getContext().newBodyInvoker().
-                    withContext(EnvironmentExpander.merge(getContext().get(EnvironmentExpander.class), new Overrider(secretOverrides, publicOverrides))).
-                    withContext(BodyInvoker.mergeConsoleLogFilters(getContext().get(ConsoleLogFilter.class), new Filter(secretOverrides.values(), run.getCharset().name()))).
-                    withContext(FailureHandler.merge(getContext().get(FailureHandler.class), new Handler(secretOverrides.values()))).
-                    withCallback(new Callback2(unbinders)).
+                    withContext(expander).
+                    withContext(logFilter).
+                    withContext(failureHandler).
+                    withCallback(new Callback2(unbinders, refreshingOverrider)).
                     start();
         }
 
@@ -175,13 +225,25 @@ public final class BindingStep extends Step {
             private static final long serialVersionUID = 1;
 
             private final List<MultiBinding.Unbinder> unbinders;
+            // null unless the step had selected (refreshing) bindings.
+            private final RefreshingOverrider refreshingOverrider;
 
-            Callback2(List<MultiBinding.Unbinder> unbinders) {
+            Callback2(List<MultiBinding.Unbinder> unbinders, RefreshingOverrider refreshingOverrider) {
                 this.unbinders = unbinders;
+                this.refreshingOverrider = refreshingOverrider;
             }
 
             @Override protected void finished(StepContext context) throws Exception {
-                new Callback(unbinders).finished(context);
+                // Run the stock unbinders and the refreshing unbinders in a try-finally so both always
+                // execute even if one of them throws, and neither set is leaked.
+                try {
+                    new Callback(unbinders).finished(context);
+                } finally {
+                    if (refreshingOverrider != null) {
+                        refreshingOverrider.unbindAll(context.get(Run.class), context.get(FilePath.class),
+                                context.get(Launcher.class), context.get(TaskListener.class));
+                    }
+                }
             }
 
         }

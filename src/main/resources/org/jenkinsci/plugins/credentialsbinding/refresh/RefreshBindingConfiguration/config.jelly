@@ -1,0 +1,8 @@
+<?jelly escape-by-default='true'?>
+<j:jelly xmlns:j="jelly:core" xmlns:f="/lib/form">
+  <f:section title="Refresh bound credentials">
+    <f:entry field="entries" title="Credentials refreshed per step">
+      <f:repeatableProperty field="entries" add="Add credential"/>
+    </f:entry>
+  </f:section>
+</j:jelly>

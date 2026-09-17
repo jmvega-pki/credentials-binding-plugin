@@ -1,0 +1,19 @@
+<div>
+  Credentials listed here are <b>re-resolved on every step</b> of a
+  <code>withCredentials</code> (or Pipeline <code>environment{}</code>) block, instead of being
+  resolved once and cached for the whole block.
+  <p>
+    This is intended for credentials whose secret is short-lived and rotated on each read — for
+    example a GitHub App installation token, which expires after about one hour. In a long-running
+    build the cached token would go stale mid-block and later steps would fail with an expired
+    token; refreshing per step makes every step see a fresh value.
+  </p>
+  <p>
+    All values a refreshed credential produces during the block (both the old and the newly rotated
+    ones) stay masked in the console log and on the failure/exception surface.
+  </p>
+  <p>
+    Leave the list empty to keep the standard behavior: every credential is resolved once and cached,
+    exactly as without this setting.
+  </p>
+</div>
