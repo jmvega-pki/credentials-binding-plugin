@@ -50,28 +50,34 @@ import java.util.logging.Logger;
  * (each Pipeline step) to get fresh values, and feeds each new value to the RefreshingFilter for masking.
  *
  * <p>This object is persisted by CPS in two places (the body's EnvironmentExpander context
- * and {@code BindingStep.Callback2}). The build context ({@code run}/{@code workspace}/{@code launcher}/
- * {@code listener}) is not durably serializable ({@link Launcher} in particular), so those fields are
- * {@code transient}. CPS keeps the live in-memory object across step boundaries within a run, so the
- * transient fields survive normal operation and per-step refreshing keeps working; they are only null
- * after an actual controller restart mid-step. To degrade gracefully in that window, the last
- * successfully-resolved values are kept in serializable fields (secrets as {@link Secret}, mirroring the
- * stock Overrider) and written when the live context is unavailable, instead of throwing.
+ * and {@code BindingStep.Callback2}). The live context -- the build handles
+ * ({@code run}/{@code workspace}/{@code launcher}/{@code listener}) <em>and the {@code bindings}
+ * themselves</em> -- is not durably serializable ({@link Launcher} and {@link MultiBinding} in
+ * particular are not {@link java.io.Serializable}), so all of those fields are {@code transient}.
+ * CPS keeps the live in-memory object across step boundaries within a run, so the transient fields
+ * survive normal operation and per-step refreshing keeps working; they are only null after an actual
+ * controller restart mid-step. To degrade gracefully in that window, the last successfully-resolved
+ * values are kept in serializable fields (secrets as {@link Secret}, mirroring the stock Overrider)
+ * and written when the live context is unavailable, instead of throwing.
  */
 @SuppressFBWarnings(
-        value = {"SE_BAD_FIELD", "SE_TRANSIENT_FIELD_NOT_RESTORED"},
-        justification = "'bindings' holds Describable bindings that are serializable at "
-                + "runtime (their declared type is not marked Serializable, so SpotBugs cannot prove it); "
-                + "the transient build-context fields (run/workspace/launcher/listener/liveContext) are "
-                + "intentionally not restored on deserialization -- after a controller restart expand() "
-                + "falls back to the persisted last-known values instead of the (now null) live context.")
+        value = {"SE_TRANSIENT_FIELD_NOT_RESTORED"},
+        justification = "The transient live-context fields "
+                + "(bindings/run/workspace/launcher/listener/liveContext) are intentionally not "
+                + "restored on deserialization -- MultiBinding and the build handles are not "
+                + "Serializable, so persisting them would break CPS program serialization. After a "
+                + "controller restart expand() detects the lost context and falls back to the "
+                + "persisted last-known values instead of the (now null) live context.")
 public class RefreshingOverrider extends EnvironmentExpander {
 
     private static final long serialVersionUID = 1L;
 
     private static final Logger LOGGER = Logger.getLogger(RefreshingOverrider.class.getName());
 
-    private final List<MultiBinding<?>> bindings;
+    // Not durably serializable (MultiBinding is not Serializable), so transient -- part of the live
+    // context. Survives step boundaries on the live in-memory object; null only after a controller
+    // restart, where expand() falls back to lastSecretValues/lastPublicValues via liveContext=false.
+    private transient List<MultiBinding<?>> bindings;
     private final RefreshingFilter filter;
     private final Set<String> variableNames;
     private final List<MultiBinding.Unbinder> unbinders = new ArrayList<>();

@@ -16,7 +16,7 @@
   <name>Credentials Binding Plugin</name>
   <url>https://github.com/jenkinsci/${project.artifactId}-plugin</url>
   <properties>
-    <changelist>728.v902a_273b_8947.1</changelist>
+    <changelist>728.v902a_273b_8947.2</changelist>
     <!-- https://www.jenkins.io/doc/developer/plugin-development/choosing-jenkins-baseline/ -->
     <jenkins.baseline>2.479</jenkins.baseline>
     <jenkins.version>${jenkins.baseline}.3</jenkins.version>
